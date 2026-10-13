@@ -69,3 +69,14 @@ Input: the acquired matrix, 3·samples_per_pri × N_dataset (`X_3PRI_real.npy`),
 The UI accepts the resulting `rp_physical_rc_model.npz`. Its chirp-rate card shows the
 direct K readout, with B/T_p shown for comparison, and the template match warns about
 unfamiliar signals.
+
+## Variable PRI UI (`RedPitaya_ESN_Dashboard_VarPRI.py`)
+This is a separate copy of the dashboard. **PRI (µs)** and **PRIs per window** are set in the UI
+instead of being fixed at 512 µs × 3. The original `RedPitaya_ESN_Dashboard.py` is unchanged.
+- PRI can be any value. It is rounded to whole samples for folding, and the header shows the actual PRI.
+- **Set PRI → From model** takes the PRI, PRIs per window and decimation from the selected model.
+  **From TX** takes the PRI announced by the HackRF UDP reference.
+- A model runs only at the PRI and decimation it was trained with, and the error message names them.
+  The number of PRIs per window may differ from training, because the features fold the window into one PRI.
+- The recorder stores `samples_per_pri`, `pri_us` and `pri_per_window` in `meta.json`. It refuses to mix
+  windows recorded at a different PRI or PRI count into the same folder, and replay checks the same values.
