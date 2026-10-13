@@ -8,6 +8,11 @@ which has separate PW and BW readouts.
 Without a trained model the dashboard still streams, plots and can RECORD
 labelled windows (TX truth from UDP or the manual reference) for training.
 
+Models: TrainPhysicalRC.py (atomic receiver as the reservoir, linear readouts
+for PW, BW and the chirp rate K directly) or TrainESN_Real.py (digital ESN /
+pulse features). The chirp-rate card shows the DIRECT K readout when the model
+has one; BW/PW is shown next to it for comparison.
+
 Edit CONFIG below or use the GUI, then run: python RedPitaya_ESN_Dashboard.py
 Requires PyQt5, pyqtgraph, numpy, scipy and the Red Pitaya streaming
 python_lib (../../python_lib by default; matching _python_lib3_XX.so).
@@ -29,6 +34,7 @@ import time
 import numpy as np
 
 from SDR_UDP_Reference import UDP_PORT, UDPListener, ReferenceComparator
+from physical_rc import MODEL_FORMAT as PHYSICAL_RC_FORMAT, PhysicalRCModel
 from rp_core import RealEsnModel
 
 try:
@@ -107,9 +113,11 @@ CONFIG = Settings()
 
 
 class SavedModel:
-    """Model saved by TrainESN_Real.py: separate PW and BW readouts on real samples."""
+    """TrainPhysicalRC.py model (PW, BW, direct K) or TrainESN_Real.py model (PW, BW)."""
     def __init__(self, path, settings):
-        self.model = RealEsnModel.load(path)
+        with np.load(path, allow_pickle=False) as archive:
+            kind = str(archive["model_format"]) if "model_format" in archive.files else ""
+        self.model = (PhysicalRCModel if kind == PHYSICAL_RC_FORMAT else RealEsnModel).load(path)
         if not math.isclose(self.model.fs, settings.fs, rel_tol=0, abs_tol=0.5):
             raise ValueError(f"Model Fs={self.model.fs/1e6:.6g} MSPS but RX is {settings.fs/1e6:.6g} MSPS "
                              f"(decimation {settings.decimation}). Use the decimation the model was trained with.")
@@ -125,7 +133,7 @@ class SavedModel:
         output, info = self.model.predict(x)
         if not all(np.isfinite(v) for v in output.values()):
             raise ValueError("ESN returned non-finite predictions.")
-        return output["PW"], output["BW"], info   # PW in us, BW in kHz
+        return output, info   # PW in us, BW in kHz, K (if present) in kHz/us = 1e9 Hz/s
 
 
 class WindowAssembler:
@@ -605,18 +613,23 @@ class ReceiverSession:
                 clipping = float(100 * np.mean(np.abs(x) >= 0.999))
                 result = dict(frame=frame, rms_fs=rms, clipping_percent=clipping, completed_at=0.0)
                 if model is not None:
-                    pw_us, bw_khz, info = model.predict(x)
+                    output, info = model.predict(x)
+                    pw_us, bw_khz = output["PW"], output["BW"]
                     valid = 0 < pw_us <= s.pri_us and 0 < bw_khz
+                    derived = bw_khz / pw_us * 1e9 if valid else math.nan
+                    direct = output["K"] * 1e9 if "K" in output and output["K"] > 0 else math.nan
                     quality = ("No pulse detected" if not info["detected"] else
                                "Clipping" if clipping > 0.01 else
                                "Out of range" if not valid else "Estimate available")
-                    result.update(pw_us=pw_us, bw_khz=bw_khz, chirp_rate=(bw_khz/pw_us*1e9 if valid else math.nan),
-                                  snr_db=info["snr_db"], rise=info["rise"], fall=info["fall"], base=info["base"],
-                                  folded=info["folded"], quality=quality)
+                    result.update(pw_us=pw_us, bw_khz=bw_khz, chirp_rate_derived=derived, chirp_rate_direct=direct,
+                                  chirp_rate=direct if "K" in output else derived,
+                                  snr_db=info.get("snr_db", math.nan), match=info.get("match", math.nan),
+                                  rise=info.get("rise", math.nan), fall=info.get("fall", math.nan),
+                                  base=info.get("base", math.nan), folded=info["folded"], quality=quality)
                 else:
                     n = s.samples_per_pri
                     result.update(folded=x[:n * (x.size // n)].reshape(-1, n).mean(axis=0), rise=math.nan,
-                                  fall=math.nan, base=math.nan, snr_db=math.nan,
+                                  fall=math.nan, base=math.nan, snr_db=math.nan, match=math.nan,
                                   quality="No model — acquisition only")
                 result["inference_ms"] = (time.monotonic() - started) * 1000
                 result["completed_at"] = time.monotonic()
@@ -805,7 +818,8 @@ def run_dashboard():
             cards = QtWidgets.QHBoxLayout()
             self.pw_card = self.card(cards, "ESTIMATED PW", "µs", "#50dfc2")
             self.bw_card = self.card(cards, "ESTIMATED BW", "kHz", "#56c7ff")
-            self.rate_card = self.card(cards, "CHIRP RATE MAGNITUDE", "Hz/s", "#ffce76")
+            self.rate_card = self.card(cards, "CHIRP RATE MAGNITUDE", "Hz/s · direct readout if the model has one",
+                                       "#ffce76")
             right.addLayout(cards)
             self.quality_label = QtWidgets.QLabel("Waiting for receiver data")
             self.quality_label.setWordWrap(True)
@@ -1035,6 +1049,11 @@ def run_dashboard():
                         line.hide()
                 frame = result["frame"]
                 snr = f"in-pulse SNR {result['snr_db']:.1f} dB  ·  " if np.isfinite(result["snr_db"]) else ""
+                if np.isfinite(result["match"]):
+                    snr += f"template match {result['match']:.3f}  ·  "
+                if np.isfinite(result.get("chirp_rate_direct", math.nan)):
+                    snr += (f"k direct {result['chirp_rate_direct']:.4e} vs BW/PW "
+                            f"{result['chirp_rate_derived']:.4e} Hz/s  ·  ")
                 self.quality_label.setText(f"{result['quality']}  ·  window #{frame.sequence}  ·  {snr}"
                                           f"RMS {result['rms_fs']:.4f} FS  ·  clipping {result['clipping_percent']:.3f}%")
                 if "pw_us" in result:
@@ -1045,7 +1064,10 @@ def run_dashboard():
                         self.seen_sequence = frame.sequence
                         record = dict(elapsed_s=result["completed_at"] - self.session.started_at,
                                       sequence=frame.sequence, pw_us=result["pw_us"], bw_khz=result["bw_khz"],
-                                      chirp_rate_Hz_per_s=result["chirp_rate"], snr_db=result["snr_db"],
+                                      chirp_rate_Hz_per_s=result["chirp_rate"],
+                                      chirp_rate_direct_Hz_per_s=result["chirp_rate_direct"],
+                                      chirp_rate_derived_Hz_per_s=result["chirp_rate_derived"],
+                                      template_match=result["match"], snr_db=result["snr_db"],
                                       rms_fs=result["rms_fs"], inference_ms=result["inference_ms"],
                                       quality=result["quality"])
                         record.update(result.get("comparison", {}))
