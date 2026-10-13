@@ -43,7 +43,7 @@ except ImportError:
     threadpool_limits = None
 
 HERE = Path(__file__).resolve().parent
-DECIMATIONS = (8, 16, 32, 64, 128, 256)     # 512 us PRI = whole samples at 125 MSPS / these
+DECIMATIONS = (2, 4, 8, 16, 32, 64, 128, 256)   # 512 us PRI = whole samples at 125 MSPS / these
 
 
 # ============================================================
