@@ -297,9 +297,14 @@ class RedPitayaSource:
         base_rate, bits, base_bits, att20 = meta
         if self.first_meta is None:
             self.first_meta = meta
-            if base_rate and not math.isclose(base_rate / self.settings.decimation, self.settings.fs, abs_tol=0.5):
-                raise RuntimeError(f"Board ADC clock is {base_rate/1e6:g} MHz, not {self.settings.base_rate/1e6:g} MHz; "
-                                   "set base_rate for this board and retrain.")
+            # The library reports channel.baseRate as the decimated output rate on some
+            # firmware (31.25 MHz at decimation 4) and as the ADC clock on others: accept both.
+            if base_rate and not (math.isclose(base_rate, self.settings.fs, rel_tol=1e-6) or
+                                  math.isclose(base_rate / self.settings.decimation, self.settings.fs, rel_tol=1e-6)):
+                raise RuntimeError(f"Board reports {base_rate/1e6:g} MHz, which is neither the expected "
+                                   f"{self.settings.fs/1e6:g} MSPS output rate nor a {self.settings.base_rate/1e6:g} MHz "
+                                   f"ADC clock at decimation {self.settings.decimation}. Check the decimation on the "
+                                   "board, or set base_rate for this board and retrain.")
         with self.lock:
             overflow, self.host_overflow = self.host_overflow, False
         full_scale = float(2 ** ((bits or base_bits or 16) - 1))
